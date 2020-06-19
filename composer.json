@@ -24,8 +24,8 @@
             "url": "https://github.com/robsheldon/asinius-core"
         },
         {
-            "type": "path",
-            "url": "/work/development/asinius/email"
+            "type": "vcs",
+            "url": "https://github.com/robsheldon/asinius-email"
         }
     ]
 }
