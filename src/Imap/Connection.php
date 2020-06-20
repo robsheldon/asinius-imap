@@ -202,6 +202,71 @@ class Connection
 
 
     /**
+     * Executes an imap command while juggling different mailboxes and catching
+     * common errors.
+     *
+     * @param   string      $mailbox
+     * @param   string      $command
+     * @param   array       $parameters
+     *
+     * @internal
+     *
+     * @throws  \RuntimeException
+     *
+     * @return  mixed
+     */
+    protected function _run_imap_command ($mailbox, $command, $parameters)
+    {
+        if ( $this->_status != 1 ) {
+            return null;
+        }
+        if ( ! $this->ready() ) {
+            throw new \RuntimeException('No imap connection');
+        }
+        if ( ! is_null($mailbox) ) {
+            //  Mailboxes are left in a readonly state by default.
+            if ( $command == 'imap_delete' ) {
+                $flags = 0;
+                $this->_expunge_on_close = true;
+            }
+            else {
+                $flags = OP_READONLY;
+            }
+            //  Switch the mailbox as necessary.
+            if ( $mailbox != $this->_current_mailbox['path'] || ($flags != $this->_current_mailbox['flags'] && $this->_current_mailbox['flags'] !== 0 && $flags != OP_READONLY) ) {
+                if ( $this->_expunge_on_close ) {
+                    imap_expunge($this->_imap_connection);
+                    $this->_expunge_on_close = false;
+                }
+                if ( ! imap_reopen($this->_imap_connection, $this->_configuration . $mailbox, $flags) ) {
+                    throw new \RuntimeException("Error switching to mailbox $mailbox");
+                }
+                $this->_current_mailbox['path'] = $mailbox;
+                $this->_current_mailbox['flags'] = $flags;
+            }
+        }
+        $result = null;
+        $error_message = '';
+        try {
+            $result = @call_user_func_array($command, $parameters);
+        } catch (Exception $e) {
+            $error_message = $e->getMessage();
+        }
+        //  TODO: Better error/alert handling. Call imap_errors() and imap_alerts()
+        //  and parse the results.
+        if ( is_null($result) ) {
+            if ( ! @imap_ping($this->_imap_connection) ) {
+                throw new \RuntimeException('Lost the imap connection');
+            }
+            if ( $error_message != '' ) {
+                throw new \RuntimeException("Error in $command: $error_message");
+            }
+        }
+        return $result;
+    }
+
+
+    /**
      * Create a new imap connection object. This does not open the imap connection.
      *
      * @param   string      $hostname
@@ -409,13 +474,7 @@ class Connection
      */
     public function get_folders ($search = '%')
     {
-        if ( $this->_status == -1 ) {
-            return [];
-        }
-        if ( ! $this->ready() ) {
-            throw new \RuntimeException("No imap connection");
-        }
-        $mailboxes = imap_getmailboxes($this->_imap_connection, $this->_configuration, $search);
+        $mailboxes = $this->_run_imap_command(null, 'imap_getmailboxes', [$this->_imap_connection, $this->_configuration, $search]);
         if ( ! is_array($mailboxes) ) {
             //  TODO: Better error/alert handling. Look up and parse the last
             //  relevant error or alert.
@@ -448,11 +507,11 @@ class Connection
      */
     public function get_message_count ($mailbox = 'INBOX')
     {
-        if ( $this->_status != 1 ) {
+        $count = $this->_run_imap_command($mailbox, 'imap_num_msg', [$this->_imap_connection]);
+        if ( ! is_int($count) ) {
             return 0;
         }
-        $this->_use_mailbox($mailbox);
-        return imap_num_msg($this->_imap_connection);
+        return $count;
     }
 
 
@@ -465,13 +524,11 @@ class Connection
      */
     public function get_message_uids ($mailbox = 'INBOX')
     {
-        if ( $this->_status != 1 ) {
+        $messages = $this->_run_imap_command($mailbox, 'imap_sort', [$this->_imap_connection, SORTARRIVAL, 1, SE_UID | SE_NOPREFETCH]);
+        if ( ! is_array($messages) ) {
             return [];
         }
-        $this->_use_mailbox($mailbox);
-        //$messages = imap_search($this->_imap_connection, 'ALL', SE_UID);
-        $messages = imap_sort($this->_imap_connection, SORTARRIVAL, 1, SE_UID | SE_NOPREFETCH);
-        return ($messages === false ? [] : $messages);
+        return $messages;
     }
 
 
@@ -481,28 +538,40 @@ class Connection
      * @param   string      $mailbox
      * @param   int         $message_uid
      *
-     * @throws  \RuntimeException
-     *
      * @return  string
      */
-    public function retrieve_message_header ($mailbox, $message_uid)
+    public function get_message_headers ($mailbox, $message_uid)
     {
-        if ( $this->_status != 1 ) {
-            return '';
+        return $this->_run_imap_command($mailbox, 'imap_fetchheader', [$this->_imap_connection, $message_uid, FT_UID]);
+    }
+
+
+    /**
+     * Retrieve message structure metadata.
+     *
+     * @param   string      $mailbox
+     * @param   int         $message_uid
+     *
+     * @return  array
+     */
+    public function get_message_structure ($mailbox, $message_uid)
+    {
+        $structure = $this->_run_imap_command($mailbox, 'imap_fetchstructure', [$this->_imap_connection, $message_uid, FT_UID]);
+        //  imap_fetchstructure returns an object for some godforsaken reason,
+        //  so it gets converted to an array here.
+        if ( ! is_object($structure) ) {
+            return [];
         }
-        $this->_use_mailbox($mailbox);
-        try {
-            $header = @imap_fetchheader($this->_imap_connection, $message_uid, FT_UID);
-        } catch (Exception $e) {
-            ;
+        $structure = (array) $structure;
+        if ( isset($structure['parts']) && is_array($structure['parts']) ) {
+            $structure['parts'] = array_map(function($part){
+                if ( ! is_object($part) ) {
+                    return [];
+                }
+                return (array) $part;
+            }, $structure['parts']);
         }
-        if ( empty($header) ) {
-            $msg_index = @imap_msgno($this->_imap_connection, $message_uid);
-            if ( $msg_index === false || $msg_index < 1 ) {
-                throw new \RuntimeException("Lost the imap connection");
-            }
-        }
-        return $header;
+        return $structure;
     }
 
 
@@ -516,10 +585,7 @@ class Connection
      */
     public function put_message ($message, $mailbox = 'INBOX')
     {
-        if ( $this->_status != 1 ) {
-            return;
-        }
-        return imap_append($this->_imap_connection, $this->_configuration . $mailbox, $message);
+        return $this->_run_imap_command($mailbox, 'imap_append', [$this->_imap_connection, $this->_configuration . $mailbox, $message]);
     }
 
 
@@ -533,12 +599,7 @@ class Connection
      */
     public function delete_message ($mailbox, $message_uid)
     {
-        if ( $this->_status != 1 ) {
-            return;
-        }
-        $this->_use_mailbox($mailbox, 0);
-        $this->_expunge_on_close = true;
-        return imap_delete($this->_imap_connection, $message_uid, FT_UID);
+        return $this->_run_imap_command($mailbox, 'imap_delete', [$this->_imap_connection, $message_uid, FT_UID]);
     }
 
 }
