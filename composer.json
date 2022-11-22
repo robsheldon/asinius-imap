@@ -3,7 +3,7 @@
     "type": "library",
     "license": "MIT",
     "require": {
-        "php": "~5.3 | ^7.0",
+        "php": "~5.3 | ^7.0 | ^8.0",
         "asinius/asinius": "dev-master",
         "asinius/email": "dev-master"
     },
