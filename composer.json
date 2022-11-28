@@ -3,12 +3,10 @@
     "type": "library",
     "license": "MIT",
     "require": {
-        "php": "~5.3 | ^7.0 | ^8.0",
-        "asinius/asinius": "dev-master",
+        "php": "~5.4 | ^7.0 | ^8.0",
+        "ext-imap": "*",
+        "asinius/asinius": "dev-release",
         "asinius/email": "dev-master"
-    },
-    "require-dev": {
-        "squizlabs/php_codesniffer": "3.*"
     },
     "autoload": {
         "psr-4": {
